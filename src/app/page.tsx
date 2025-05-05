@@ -75,7 +75,20 @@ class InspectModule implements InspectModuleType {
    // Required nullGetter for modules
     nullGetter(part: any, scope?: any, context?: any): undefined { // Make scope and context optional
         // This module doesn't change rendering, just inspects. Always return undefined during inspection.
-        return undefined;
+        // Add basic check to prevent errors if context or context.scopePathItem is undefined
+         if (!context || !context.scopePathItem) {
+             return undefined;
+         }
+
+        // Original logic from fix, seems okay but check context validity first
+         const resolved = context.scopePathItem;
+         // Ensure resolved is an array before accessing length
+         // Check if resolved exists and is an array before accessing length
+          if (!resolved || !Array.isArray(resolved) || context.scopePathLength >= resolved.length) {
+             return undefined;
+         }
+         const value = resolved[context.scopePathLength];
+         return value; // Return the value found in scope path
     }
 
 
@@ -153,6 +166,68 @@ const getRawNumericValue = (value: string | number | undefined): number | null =
     return isNaN(num) ? null : num;
 };
 
+/**
+ * Converts a Russian name (Фамилия И. О.) to the genitive case.
+ * This is a simplified implementation focusing on common endings.
+ * @param name The name in nominative case (e.g., "Иванов И. И." or "Байсеитова У.")
+ * @returns The name potentially converted to genitive case (e.g., "Иванова И. И." or "Байсеитовой У.")
+ */
+function getGenitiveCase(name: string | undefined): string {
+    if (!name || typeof name !== 'string') return '';
+
+    const parts = name.trim().split(' ');
+    if (parts.length === 0) return '';
+
+    let lastName = parts[0];
+    const initials = parts.slice(1).join(' '); // Keep initials as they are
+
+    // Rules priority: Specific endings first, then more general ones.
+
+    // Feminine endings -а/-я -> -ой/-ей (Common rule, applies to many cases like -ова, -ева, -ина, -ая)
+    if (lastName.endsWith('ова') || lastName.endsWith('ева') || lastName.endsWith('ина') || lastName.endsWith('ая')) {
+        lastName = lastName.substring(0, lastName.length - 1) + 'ой';
+    }
+    // More general feminine -а -> -ой (e.g., Петрова -> Петровой)
+    else if (lastName.endsWith('а') && !lastName.endsWith('ска') && !lastName.endsWith('цка')) { // Avoid changing masculine -ска/-цка
+        lastName = lastName.substring(0, lastName.length - 1) + 'ой';
+    }
+    // Feminine ending -я -> -и (e.g., Синяя -> Синей - already covered by -ая? No, consider Берия -> Берии)
+    // This also applies to masculine sometimes. Rule: ending in -я -> -и
+    else if (lastName.endsWith('я')) {
+        lastName = lastName.substring(0, lastName.length - 1) + 'и';
+    }
+    // Masculine endings -ов/-ев/-ин -> -ова/-ева/-ина
+    else if (lastName.endsWith('ов') || lastName.endsWith('ев')) {
+        lastName += 'а';
+    } else if (lastName.endsWith('ин') && !lastName.endsWith('шин') && !lastName.endsWith('чин')) { // Avoid -шин/-чин common in masculine
+        lastName += 'а';
+    }
+    // Masculine endings -ский/-цкий -> -ского/-цкого
+    else if (lastName.endsWith('ский') || lastName.endsWith('цкий')) {
+      lastName = lastName.substring(0, lastName.length - 2) + 'ого';
+    }
+    // Masculine ending -ой -> -ого (e.g., Толстой -> Толстого)
+    else if (lastName.endsWith('ой')) {
+        lastName = lastName.substring(0, lastName.length - 2) + 'ого';
+    }
+    // Masculine ending -ый/-ий -> -ого/-его (e.g. Белый -> Белого)
+    else if (lastName.endsWith('ый') || lastName.endsWith('ий')) {
+        lastName = lastName.substring(0, lastName.length - 2) + 'ого';
+    }
+    // Masculine surnames ending in soft sign 'ь' -> 'я' (e.g. Воробей -> Воробья)
+    else if (lastName.endsWith('ь')) {
+        lastName = lastName.substring(0, lastName.length - 1) + 'я';
+    }
+    // Masculine ending in consonant -> add 'а' (e.g. Мельник -> Мельника)
+    // Exclude 'й' which is handled by -ый/-ий or -ой
+    else if (/[бвгджзклмнпрстфхцчшщ]$/i.test(lastName)) {
+         lastName += 'а';
+    }
+
+    // Reassemble the name
+    return initials ? `${lastName} ${initials}` : lastName;
+}
+
 
 export default function Home() {
   const [templateFile, setTemplateFile] = useState<File | null>(null);
@@ -209,7 +284,22 @@ export default function Home() {
                      modules: [iModule], // Use the module
                      paragraphLoop: true,
                      linebreaks: true,
-                     // REMOVE custom parser and nullGetter here, let the module handle it
+                     // Custom parser to handle potential errors gracefully during inspection
+                      parser: (tag) => {
+                        return {
+                          get: (scope: any, context: any) => {
+                            // Simplified getter for inspection: just return the tag name itself
+                            // This avoids errors if the tag is complex or refers to missing data
+                            // The actual data handling happens later during generation
+                             if (tag === '.') {
+                                 return scope;
+                             }
+                            // Return undefined for inspection purposes, letting the module collect the tag name
+                             return undefined;
+                          },
+                        };
+                      },
+                     // Keep nullGetter in module for completeness, but parser above handles inspection phase
                 });
 
 
@@ -222,12 +312,17 @@ export default function Home() {
                  try {
                     doc.render({}); // This triggers the module's get methods if not already done by compile
                  } catch (renderError: any) {
-                     // Log benignly as render might fail without data, but compile() likely got the tags
-                     console.warn("Inspection render encountered an error (might be ignorable if tags were found):", renderError.message);
+                    // Log benignly as render might fail without data, but compile() likely got the tags
+                     // Avoid logging "Cannot read property 'toString' of undefined" which is expected here
+                    if (!renderError.message || !renderError.message.includes('toString')) {
+                         console.warn("Inspection render encountered an error (might be ignorable if tags were found):", renderError.message);
+                    }
                      // Check if it's a 'missing data' type error, which we expect here.
                      if (renderError.properties?.id !== 'render_error' && renderError.properties?.id !== 'scope_error') {
                         // If it's not a simple render/scope error, maybe re-throw or log more severely
                         console.error('Potentially problematic error during inspection render:', renderError);
+                        // Set an error state if it's likely a template issue
+                        setError(`Template Parsing Issue: ${renderError.message}. Check template syntax.`);
                      }
                      // Continue anyway, hoping tags were collected during compile/parse phase
                  }
@@ -235,19 +330,23 @@ export default function Home() {
 
                 // Get the tags collected by the inspection module
                 const tags = iModule.getAllTags();
-                const uniquePlaceholders = Object.keys(tags);
+                let uniquePlaceholders = Object.keys(tags);
 
-                // If no tags found and there was a render error, report template issue
-                 if (uniquePlaceholders.length === 0 && error === null) { // Check if an error wasn't already set
-                      // Check if a render error occurred previously
-                      const renderErrorExists = typeof window !== 'undefined' && (window as any).__INSPECTION_RENDER_ERROR__; // Simple flag, adjust if needed
-                       if (renderErrorExists) {
-                          setError("Failed to parse template placeholders. Check template syntax or complexity.");
-                          delete (window as any).__INSPECTION_RENDER_ERROR__; // Clean up flag
-                       } else if (uniquePlaceholders.length === 0) {
-                          setError("No placeholders found in the template. Ensure they are correctly formatted like {placeholder_name}.");
-                       }
+                 // Add the special genitive case placeholder if 'director_name' exists
+                 if (uniquePlaceholders.includes('director_name')) {
+                   // Ensure director_name_genitive is added and positioned correctly (e.g., after director_name)
+                    const directorIndex = uniquePlaceholders.indexOf('director_name');
+                    if (!uniquePlaceholders.includes('director_name_genitive')) {
+                         uniquePlaceholders.splice(directorIndex + 1, 0, 'director_name_genitive');
+                    }
                  }
+
+
+                 // If no tags found and there wasn't a serious error already, report template issue
+                if (uniquePlaceholders.filter(p => p !== 'director_name_genitive').length === 0 && !error) { // Exclude generated tag from check
+                    setError("No placeholders like {placeholder_name} found, or the template might have syntax errors preventing parsing.");
+                }
+
 
                 setPlaceholders(uniquePlaceholders);
 
@@ -255,13 +354,21 @@ export default function Home() {
                 const initialFormData: Record<string, string> = {};
                  const currentFormData = { ...formData }; // Capture current state for pre-filling
                 uniquePlaceholders.forEach((ph) => {
-                  initialFormData[ph] = '';
-                  // Pre-fill contract_am_words if contract_am exists (using captured state)
-                   if (ph.endsWith('_words') && !ph.startsWith('contract_am')) { // Generalize for any amount field
-                       const baseName = ph.replace('_words', '');
-                       if (currentFormData[baseName]) {
+                  // Pre-fill director_name_genitive based on director_name
+                  if (ph === 'director_name_genitive') {
+                    initialFormData[ph] = getGenitiveCase(currentFormData['director_name'] || '');
+                  } else {
+                      initialFormData[ph] = currentFormData[ph] || ''; // Keep existing or empty
+                  }
+
+                  // Pre-fill _words fields if the base _am field exists (using captured state)
+                   if (ph.endsWith('_words')) { // Check for '_words' suffix
+                       const baseName = ph.replace(/_words$/, '_am'); // Find corresponding _am field name
+                       if (currentFormData[baseName]) { // Check if base field has data in current form state
                             const rawAmount = getRawNumericValue(currentFormData[baseName]);
                             initialFormData[ph] = rawAmount !== null ? numberToWords(rawAmount) : '';
+                       } else {
+                            initialFormData[ph] = ''; // Ensure it's empty if base is empty
                        }
                    }
                 });
@@ -295,7 +402,8 @@ export default function Home() {
 
    const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
        const {name, value} = event.target;
-       const isAmountField = name.includes('am') && !name.includes('words');
+       // Identify amount fields: contains '_am' and does NOT end with '_words'
+       const isAmountField = name.includes('_am') && !name.endsWith('_words'); // Update exclusion
 
         setFormData((prevData) => {
             const newData = { ...prevData };
@@ -306,7 +414,7 @@ export default function Home() {
                  newData[name] = rawValue; // Store the cleaned numeric string
 
                  // Automatically update corresponding _words field
-                 const wordsFieldName = `${name}_words`;
+                 const wordsFieldName = name.replace(/_am$/, '_words'); // Construct the _words field name
                  if (newData.hasOwnProperty(wordsFieldName)) {
                      const amount = parseFloat(rawValue);
                      if (!isNaN(amount)) {
@@ -317,6 +425,10 @@ export default function Home() {
                  }
             } else {
                  newData[name] = value; // Store other fields as is
+                 // If director_name changes, update director_name_genitive
+                 if (name === 'director_name' && newData.hasOwnProperty('director_name_genitive')) {
+                     newData['director_name_genitive'] = getGenitiveCase(value);
+                 }
             }
 
 
@@ -361,13 +473,23 @@ export default function Home() {
     try {
         const fileBuffer = await templateFile.arrayBuffer();
 
-        // Prepare data for docxtemplater, formatting amount fields
+        // Prepare data for docxtemplater, formatting amount fields and genitive case
         const processedData: Record<string, string> = {};
         for (const key in formData) {
-             if (key.includes('am') && !key.includes('words')) {
-                 // Format amount fields for the document
+             // Format amount fields (contain '_am', not '_words') for the document
+             if (key.includes('_am') && !key.endsWith('_words')) { // Update exclusion
                  processedData[key] = formatCurrencyUzbekSum(formData[key]);
-             } else {
+             }
+             // Generate genitive case for 'director_name' - ensure correct key is used
+             else if (key === 'director_name_genitive') {
+                 // Value is already pre-calculated and stored in formData state
+                 processedData[key] = formData[key];
+             }
+             // Ensure director_name itself is passed correctly (not genitive)
+             else if (key === 'director_name') {
+                processedData[key] = formData[key];
+             }
+             else {
                  // Use other fields directly (including _words fields)
                  processedData[key] = formData[key];
              }
@@ -414,7 +536,6 @@ export default function Home() {
         <CardHeader>
           <CardTitle className="text-3xl font-bold text-center text-primary flex items-center justify-center gap-2">
             <FileText className="w-8 h-8 text-accent-foreground" /> DocuMint
-                <span className="text-base text-muted-foreground">Umida edition</span>
           </CardTitle>
           <CardDescription className="text-center text-muted-foreground pt-2">
             Upload your .docx template, fill in the placeholder values, and generate your document.
@@ -473,7 +594,7 @@ export default function Home() {
                        </Button>
                    )}
               </div>
-              <p className="text-xs text-muted-foreground">Placeholders should be in the format {'{placeholder_name}'}.</p>
+              <p className="text-xs text-muted-foreground">Placeholders should be in the format {'{placeholder_name}'}. Use {'{amount_am}'} for numbers and {'{amount_words}'} for text conversion. {'{director_name_genitive}'} is auto-generated.</p> {/* Updated instruction */}
             </div>
 
           {/* Placeholder Input Section */}
@@ -483,8 +604,16 @@ export default function Home() {
               <ScrollArea className="h-64 w-full rounded-md border p-4 bg-secondary/30">
                 <div className="space-y-4">
                   {placeholders.map((placeholder) => {
-                     const isAmountField = placeholder.includes('am') && !placeholder.includes('words');
-                     const isWordsField = placeholder.endsWith('_words');
+                     // Check if it's an amount field (contains _am, not _words)
+                     const isAmountField = placeholder.includes('_am') && !placeholder.endsWith('_words'); // Update exclusion
+                     // Check if it's a words field (ends with _words)
+                     const isWordsField = placeholder.endsWith('_words'); // Update check
+                     // Check if it's the auto-generated genitive field
+                     const isGenitiveField = placeholder === 'director_name_genitive';
+
+                     // Determine if the field is auto-generated
+                     const isAutoGenerated = isWordsField || isGenitiveField;
+
                      // Determine the value to display in the input field
                      const displayValue = isAmountField
                          ? formatCurrencyUzbekSum(formData[placeholder]) // Display formatted currency for amount fields
@@ -493,7 +622,7 @@ export default function Home() {
                      return (
                          <div key={placeholder} className="space-y-1">
                            <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
-                             {placeholder} {isWordsField ? '(Auto-generated)' : ''}
+                             {placeholder} {isAutoGenerated ? '(Auto-generated)' : ''}
                            </Label>
                            <Input
                              id={placeholder}
@@ -503,15 +632,25 @@ export default function Home() {
                              placeholder={`Enter value for {${placeholder}}`}
                              className={cn(
                                "bg-card",
-                               isWordsField && 'text-muted-foreground italic' // Style the auto-generated field
+                               isAutoGenerated && 'text-muted-foreground italic bg-muted/50 cursor-not-allowed' // Style the auto-generated field
                              )}
-                             disabled={isProcessing || isWordsField} // Disable _words input
-                             readOnly={isWordsField} // Make it read-only
+                             disabled={isProcessing || isAutoGenerated} // Disable auto-generated inputs
+                             readOnly={isAutoGenerated} // Make it read-only
                              type={'text'} // Use text type for all inputs now due to formatting
-                             // Removed step={...} as type is text
-                             // Add inputMode="numeric" for amount fields for better mobile UX
+                             // Add inputMode="decimal" for amount fields for better mobile UX
                              inputMode={isAmountField ? "decimal" : "text"}
+                             aria-describedby={isAutoGenerated ? `${placeholder}-desc` : undefined}
                            />
+                            {isGenitiveField && (
+                              <p id={`${placeholder}-desc`} className="text-xs text-muted-foreground">
+                                Automatically generated genitive case based on {'{director_name}'}.
+                              </p>
+                             )}
+                              {isWordsField && (
+                               <p id={`${placeholder}-desc`} className="text-xs text-muted-foreground">
+                                 Automatically generated words based on {'{' + placeholder.replace('_words', '_am') + '}'}.
+                               </p>
+                             )}
                          </div>
                      );
                   })}
@@ -521,7 +660,7 @@ export default function Home() {
                {/* Generate Button */}
                 <Button
                     type="submit"
-                    disabled={isProcessing || isLoading || !templateFile || placeholders.length === 0}
+                    disabled={isProcessing || isLoading || !templateFile || placeholders.filter(p => p !== 'director_name_genitive').length === 0} // Also check placeholders excluding generated one
                     className="w-full btn-teal"
                   >
                     {isProcessing ? (
