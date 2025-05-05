@@ -12,6 +12,8 @@ import {Loader2, Upload, Download, FileText, AlertCircle, RotateCcw} from 'lucid
 import {generateDocument} from '@/actions/generateDocument';
 import PizZip from 'pizzip'; // Keep PizZip for initial loading
 import Docxtemplater from 'docxtemplater'; // Import Docxtemplater
+import { numberToWords } from '@/lib/numberToWords'; // Import the helper
+import { cn } from '@/lib/utils'; // Import cn for conditional classes
 
 // Define InspectModule interface (based on docxtemplater documentation)
 interface InspectModuleType {
@@ -61,7 +63,10 @@ class InspectModule implements InspectModuleType {
    parse(placeHolderContent: string) {
        // Basic filter to avoid XML tags
        if (placeHolderContent && !placeHolderContent.startsWith('<') && !placeHolderContent.endsWith('>')) {
-            this.tags[placeHolderContent] = true; // Record the tag found
+            // Further filter specific known non-placeholder patterns if needed
+            if (!placeHolderContent.includes('</w:t>')) {
+                this.tags[placeHolderContent] = true; // Record the tag found
+            }
        }
        return {type: "placeholder", value: placeHolderContent};
    }
@@ -74,7 +79,7 @@ class InspectModule implements InspectModuleType {
          }
          const resolved = context.scopePathItem;
           // Fix: Check if resolved is defined before accessing length
-          if (!resolved || context.scopePathLength >= resolved.length) {
+          if (!resolved || !Array.isArray(resolved) || context.scopePathLength >= resolved.length) {
              return undefined;
          }
          const value = resolved[context.scopePathLength];
@@ -84,20 +89,28 @@ class InspectModule implements InspectModuleType {
 
   // Public method to retrieve all found tags
   getAllTags(): Record<string, unknown> {
-    // The inspection happens during render/resolve, so check the collected tags
-    // The `inspect` object might hold more structured info after render,
-    // but simply collecting during parse seems sufficient here.
-     // Filter out any keys that look like XML/internal docx tags
      const filteredTags: Record<string, unknown> = {};
-     const potentialTags = this.inspect.tags || this.tags;
+     // Prefer tags collected during parse as inspect.tags might contain resolved values
+     const potentialTags = this.tags;
      for (const key in potentialTags) {
          if (Object.prototype.hasOwnProperty.call(potentialTags, key)) {
-             // Simple filter: exclude if it contains '<', '/', or ':' which are common in XML artifacts
-              if (!key.includes('<') && !key.includes('/') && !key.includes(':')) {
+             // Filter out keys that are likely XML/internal tags or contain complex structures
+             // Ensure it's a simple word possibly with underscores/numbers
+              if (/^[a-zA-Z0-9_]+$/.test(key)) {
                  filteredTags[key] = potentialTags[key];
              }
          }
      }
+     // Additional check on inspect.tags if the above yields nothing, applying same filter
+      if (Object.keys(filteredTags).length === 0 && this.inspect.tags) {
+          for (const key in this.inspect.tags) {
+               if (Object.prototype.hasOwnProperty.call(this.inspect.tags, key)) {
+                   if (/^[a-zA-Z0-9_]+$/.test(key)) {
+                        filteredTags[key] = this.inspect.tags[key];
+                   }
+               }
+           }
+      }
      return filteredTags;
   }
 
@@ -174,7 +187,7 @@ export default function Home() {
                 const doc = new Docxtemplater(zip, {
                      modules: [iModule],
                      // Use the custom nullGetter from the module to avoid errors on missing tags during inspection
-                     nullGetter: (part, scopeManager) => iModule.nullGetter(part, scopeManager), // Removed undefined context pass
+                     nullGetter: (part, scopeManager, context) => iModule.nullGetter(part, scopeManager, context), // Pass context
                       // Important: Prevent errors if placeholders are not resolvable during inspection
                      parser: (tag) => {
                        return {
@@ -193,25 +206,18 @@ export default function Home() {
 
                 // Perform a dry-run render to trigger the inspection module
                 // We don't need actual data here, just need the parser to run.
-                // Providing an empty object ensures it doesn't crash on missing data.
                  try {
                     doc.render({}); // This triggers the module's parse/get methods
                  } catch (renderError: any) {
-                    // Errors during inspection render are usually template syntax issues
                     console.warn("Inspection render caught an error (likely template syntax):", renderError);
-                     // Check for specific docxtemplater compilation errors
                      if (renderError.properties && renderError.properties.id === 'compile_error') {
                          setError(`Template Compilation Error: ${renderError.properties.explanation || renderError.message}. Please check the template syntax.`);
                      } else if (renderError.properties && renderError.properties.id === 'template_error') {
                           setError(`Template Syntax Error: ${renderError.message}. Check placeholder formatting.`);
                      }
                      else {
-                        // Don't throw a fatal error here, but maybe log it
                         console.error('Unexpected error during template inspection:', renderError);
-                        // Optionally, set a less severe error or warning
-                        // setError("Could not fully inspect template placeholders due to an internal issue.");
                      }
-                     // Allow continuing to show potentially extracted tags if any were found before error
                  }
 
 
@@ -225,12 +231,15 @@ export default function Home() {
                 const initialFormData: Record<string, string> = {};
                 uniquePlaceholders.forEach((ph) => {
                   initialFormData[ph] = '';
+                  // Pre-fill contract_am_words if contract_am exists
+                   if (ph === 'contract_am_words' && formData['contract_am']) {
+                     initialFormData[ph] = numberToWords(parseFloat(formData['contract_am']) || 0);
+                   }
                 });
                 setFormData(initialFormData);
 
             } catch (err: any) {
               console.error('Error processing DOCX file:', err);
-               // Check for specific docxtemplater compilation errors that happen before render
                if (err.properties && err.properties.id === 'compile_error') {
                    setError(`Template Compilation Error: ${err.properties.explanation || err.message}. Please check the template syntax near '${err.properties.postparsed?.[err.properties.offset]?.value || 'unknown tag'}'.`);
                } else if (err.message && err.message.includes("Corrupted zip")) {
@@ -255,13 +264,27 @@ export default function Home() {
     }
   };
 
-  const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const {name, value} = event.target;
-    setFormData((prevData) => ({
-      ...prevData,
-      [name]: value,
-    }));
-  };
+   const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+       const {name, value} = event.target;
+       setFormData((prevData) => {
+           const newData = {
+               ...prevData,
+               [name]: value,
+           };
+
+           // Automatically update contract_am_words when contract_am changes
+           if (name === 'contract_am' && newData.hasOwnProperty('contract_am_words')) {
+               const amount = parseFloat(value);
+               if (!isNaN(amount)) {
+                   newData['contract_am_words'] = numberToWords(amount);
+               } else {
+                   newData['contract_am_words'] = ''; // Clear if input is not a valid number
+               }
+           }
+
+           return newData;
+       });
+   };
 
   // Internal reset logic without resetting file input
   const handleResetInternal = () => {
@@ -410,7 +433,7 @@ export default function Home() {
                   {placeholders.map((placeholder) => (
                     <div key={placeholder} className="space-y-1">
                       <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
-                        {placeholder}
+                        {placeholder} {placeholder === 'contract_am_words' ? '(Auto-generated)' : ''}
                       </Label>
                       <Input
                         id={placeholder}
@@ -418,8 +441,14 @@ export default function Home() {
                         value={formData[placeholder] || ''}
                         onChange={handleInputChange}
                         placeholder={`Enter value for {${placeholder}}`}
-                        className="bg-card"
-                        disabled={isProcessing}
+                        className={cn(
+                          "bg-card",
+                          placeholder === 'contract_am_words' && 'text-muted-foreground italic' // Style the auto-generated field
+                        )}
+                        disabled={isProcessing || placeholder === 'contract_am_words'} // Disable contract_am_words input
+                        readOnly={placeholder === 'contract_am_words'} // Make it read-only
+                        type={placeholder === 'contract_am' ? 'number' : 'text'} // Use number type for contract_am
+                        step={placeholder === 'contract_am' ? '0.01' : undefined} // Allow decimals for amount
                       />
                     </div>
                   ))}
