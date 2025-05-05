@@ -414,6 +414,7 @@ export default function Home() {
         <CardHeader>
           <CardTitle className="text-3xl font-bold text-center text-primary flex items-center justify-center gap-2">
             <FileText className="w-8 h-8 text-accent-foreground" /> DocuMint
+                (Umida edition)
           </CardTitle>
           <CardDescription className="text-center text-muted-foreground pt-2">
             Upload your .docx template, fill in the placeholder values, and generate your document.
