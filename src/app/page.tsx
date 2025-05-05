@@ -1,18 +1,108 @@
 'use client';
 
 import type {ChangeEvent, FormEvent} from 'react';
-import {useState, useEffect} from 'react';
+import {useState, useEffect, useRef} from 'react'; // Added useRef
 import {Button} from '@/components/ui/button';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
 import {Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle} from '@/components/ui/card';
 import {ScrollArea} from '@/components/ui/scroll-area';
 import {Alert, AlertDescription, AlertTitle} from '@/components/ui/alert';
-import {Loader2, Upload, Download, FileText, AlertCircle} from 'lucide-react';
+import {Loader2, Upload, Download, FileText, AlertCircle, RotateCcw} from 'lucide-react'; // Added RotateCcw
 import {generateDocument} from '@/actions/generateDocument';
+import PizZip from 'pizzip'; // Keep PizZip for initial loading
+import Docxtemplater from 'docxtemplater'; // Import Docxtemplater
 
-// Simple regex to find placeholders like {placeholder_name}
-const PLACEHOLDER_REGEX = /\{([^{}]+)\}/g;
+// Define InspectModule interface (based on docxtemplater documentation)
+interface InspectModuleType {
+    tags: Record<string, unknown>;
+    inspect: {
+        tags: Record<string, unknown>;
+        lexed: unknown;
+        parsed: unknown;
+        postparsed: unknown;
+    };
+    fullInspected: {
+        tags: Record<string, unknown>;
+        lexed: unknown;
+        parsed: unknown;
+        postparsed: unknown;
+    };
+    getTags(fileType: string): Record<string, unknown>;
+    getAllTags(): Record<string, unknown>;
+    nullGetter(part: any, scope: any): undefined;
+    // Add other methods/properties if needed based on actual usage
+}
+
+// Custom module for inspecting tags reliably
+class InspectModule {
+  public tags: Record<string, unknown> = {};
+  public inspect: any = { tags: {} }; // Simplified for this use case
+  public fullInspected: any = { tags: {} }; // Simplified
+
+  constructor() {
+    this.tags = {};
+    // Required properties/methods for a docxtemplater module
+    this.name = "InspectModule";
+  }
+
+  // Called by docxtemplater with the parser instance
+  set(obj: any) {
+    if (obj.inspect) {
+      this.inspect = obj.inspect;
+    }
+     if (obj.fullInspected) {
+      this.fullInspected = obj.fullInspected;
+    }
+  }
+
+  // Method called by docxtemplater during parsing/rendering
+   parse(placeHolderContent: string) {
+       this.tags[placeHolderContent] = true; // Record the tag found
+       return {type: "placeholder", value: placeHolderContent};
+   }
+
+   // Required nullGetter for modules
+    nullGetter(part: any, scope: any, context: any) {
+        // This module doesn't change rendering, just inspects
+         if (!context) {
+             return undefined;
+         }
+         const resolved = context.scopePathItem;
+         if (context.scopePathLength >= resolved.length) {
+             return undefined;
+         }
+         const value = resolved[context.scopePathLength];
+         return value;
+    }
+
+
+  // Public method to retrieve all found tags
+  getAllTags(): Record<string, unknown> {
+    // The inspection happens during render/resolve, so check the collected tags
+    // The `inspect` object might hold more structured info after render,
+    // but simply collecting during parse seems sufficient here.
+     return this.inspect.tags || this.tags; // Prefer inspect.tags if available after render
+  }
+
+   // Additional required methods/properties for a basic module
+    optionsTransformer(options: any, docxtemplater: any) {
+        // No options transformation needed for inspection
+        return options;
+    }
+    preparse(content: string, options: any) { return content;}
+    postparse(postparsed: any, options: any) { return postparsed; }
+    render(part: any, options: any) { /* no custom rendering */}
+    postrender(parts: any, options: any) { return parts; }
+    errorsTransformer(errors: any[]) { return errors; }
+    getNearestParagraph(options: any) { /* Optional */}
+    getStructuredTags(fileType: string) { return this.inspect.tags;} // Alias
+    getFileType() { return "docx"; } // Assume docx
+    matchers(): any[] { return []; } // No custom matchers needed
+
+
+}
+
 
 export default function Home() {
   const [templateFile, setTemplateFile] = useState<File | null>(null);
@@ -24,6 +114,8 @@ export default function Home() {
   const [fileName, setFileName] = useState<string>('');
   const [generatedBlob, setGeneratedBlob] = useState<Blob | null>(null);
   const [generatedFileName, setGeneratedFileName] = useState<string>('');
+
+  const fileInputRef = useRef<HTMLInputElement>(null); // Ref for file input
 
   // Avoid hydration mismatch for generated file name
   useEffect(() => {
@@ -52,39 +144,50 @@ export default function Home() {
       setError(null);
       setTemplateFile(file);
       setFileName(file.name);
-      setGeneratedBlob(null); // Reset generated blob when a new file is uploaded
+      setGeneratedBlob(null); // Reset generated blob
 
       const reader = new FileReader();
       reader.onload = async (e) => {
         const content = e.target?.result;
         if (content instanceof ArrayBuffer) {
             try {
-                // Dynamically import pizzip on the client-side
-                const PizZip = (await import('pizzip')).default;
                 const zip = new PizZip(content);
-                // Look for the main document part
-                const doc = zip.files['word/document.xml'] ||
-                            zip.files['word/document2.xml'] || // Some tools might name it differently
-                            Object.keys(zip.files).find(name => name.startsWith('word/') && name.endsWith('.xml')); // More robust search
+                const iModule = new InspectModule();
 
-                if (!doc) {
-                    throw new Error('Could not find the main document XML part (e.g., word/document.xml) in the DOCX file.');
-                }
-                const xmlContent = doc.asText();
+                 // Initialize Docxtemplater with the inspection module
+                const doc = new Docxtemplater(zip, {
+                     modules: [iModule],
+                     // Use the custom nullGetter from the module to avoid errors on missing tags during inspection
+                     nullGetter: (part, scopeManager) => iModule.nullGetter(part, scopeManager, undefined),
+                      // Important: Prevent errors if placeholders are not resolvable during inspection
+                     parser: (tag) => {
+                       return {
+                         get(scope: any, context: any) {
+                             // Log the tag being parsed by the module
+                             iModule.parse(tag);
+                             // Return undefined for inspection phase to avoid "property not found" errors
+                             return undefined;
+                         },
+                       };
+                     },
+                     paragraphLoop: true,
+                     linebreaks: true,
+                });
 
-                // Extract placeholders - capture content inside {}
-                const foundPlaceholders = new Set<string>();
-                let match;
-                // Regex specifically targets content *inside* the curly braces
-                while ((match = PLACEHOLDER_REGEX.exec(xmlContent)) !== null) {
-                  // match[1] contains the captured group (content inside {})
-                  foundPlaceholders.add(match[1].trim()); // Trim whitespace
-                }
 
-                const uniquePlaceholders = Array.from(foundPlaceholders);
+                // Perform a dry-run render to trigger the inspection module
+                // We don't need actual data here, just need the parser to run.
+                // Providing an empty object ensures it doesn't crash on missing data.
+                doc.setData({});
+                doc.render(); // This triggers the module's parse/get methods
+
+                // Get the tags collected by the inspection module
+                const tags = iModule.getAllTags();
+                const uniquePlaceholders = Object.keys(tags);
+
                 setPlaceholders(uniquePlaceholders);
 
-                // Initialize form data with empty strings for each placeholder (using the name without braces)
+                // Initialize form data
                 const initialFormData: Record<string, string> = {};
                 uniquePlaceholders.forEach((ph) => {
                   initialFormData[ph] = '';
@@ -93,19 +196,15 @@ export default function Home() {
 
             } catch (err: any) {
               console.error('Error processing DOCX file:', err);
-               let userMessage = 'Failed to process the DOCX template. ';
-               if (err.message && err.message.includes("Corrupted zip")) {
-                    userMessage += "The file might be corrupted or not a valid .docx file.";
-               } else if (err.message) {
-                   userMessage += err.message;
+               // Check for specific docxtemplater compilation errors
+               if (err.properties && err.properties.id === 'compile_error') {
+                   setError(`Template Compilation Error: ${err.properties.explanation || err.message}. Please check the template syntax near '${err.properties.postparsed?.[err.properties.offset]?.value || 'unknown tag'}'.`);
+               } else if (err.message && err.message.includes("Corrupted zip")) {
+                   setError("Failed to read the template file. It might be corrupted or not a valid .docx file.");
                } else {
-                   userMessage += 'Please ensure it is a valid .docx file and check its structure.';
+                   setError(`Failed to process template: ${err.message || 'Unknown error'}. Ensure it's a valid .docx file.`);
                }
-               setError(userMessage);
-              setTemplateFile(null);
-              setPlaceholders([]);
-              setFormData({});
-              setFileName('');
+              handleResetInternal(); // Use internal reset to clear state on error
             } finally {
               setIsLoading(false);
             }
@@ -130,6 +229,29 @@ export default function Home() {
     }));
   };
 
+  // Internal reset logic without resetting file input
+  const handleResetInternal = () => {
+      setTemplateFile(null);
+      setPlaceholders([]);
+      setFormData({});
+      setError(null);
+      setFileName('');
+      setGeneratedBlob(null);
+      setGeneratedFileName('generated_document.docx');
+      setIsLoading(false);
+      setIsProcessing(false);
+  }
+
+  // Reset handler for the button
+   const handleReset = () => {
+       handleResetInternal();
+       // Reset the file input value
+       if (fileInputRef.current) {
+         fileInputRef.current.value = '';
+       }
+   };
+
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!templateFile) {
@@ -143,22 +265,22 @@ export default function Home() {
 
     try {
       const fileBuffer = await templateFile.arrayBuffer();
-      // Pass formData where keys are placeholder names (without braces)
       const result = await generateDocument(fileBuffer, formData);
 
       if (result.success && result.blob) {
         setGeneratedBlob(result.blob);
-        // Update generated file name based on the uploaded file name
          if (templateFile) {
              setGeneratedFileName(`generated_${templateFile.name}`);
          }
 
       } else {
         setError(result.error || 'Failed to generate the document.');
+        setGeneratedBlob(null); // Ensure blob is null on error
       }
     } catch (err) {
       console.error('Error generating document:', err);
       setError('An unexpected error occurred during document generation.');
+      setGeneratedBlob(null); // Ensure blob is null on error
     } finally {
       setIsProcessing(false);
     }
@@ -169,7 +291,7 @@ export default function Home() {
            const url = window.URL.createObjectURL(generatedBlob);
            const a = document.createElement('a');
            a.href = url;
-           a.download = generatedFileName; // Use the state variable for the filename
+           a.download = generatedFileName;
            document.body.appendChild(a);
            a.click();
            window.URL.revokeObjectURL(url);
@@ -198,34 +320,52 @@ export default function Home() {
             </Alert>
           )}
 
-          {/* File Upload Section */}
-          <div className="space-y-2">
-            <Label htmlFor="template-upload" className="text-lg font-medium">
-              1. Upload Template (.docx)
-            </Label>
-            <div className="flex items-center gap-4">
-               <Input
-                 id="template-upload"
-                 type="file"
-                 accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" // More specific MIME type
-                 onChange={handleFileChange}
-                 className="hidden"
-                 disabled={isLoading || isProcessing}
-               />
-               <Button
-                  variant="outline"
-                  onClick={() => document.getElementById('template-upload')?.click()}
-                  disabled={isLoading || isProcessing}
-                  className="flex-shrink-0"
-               >
-                 <Upload className="mr-2 h-4 w-4" />
-                 {fileName ? 'Change File' : 'Choose File'}
-               </Button>
-               {fileName && <span className="text-sm text-muted-foreground truncate">{fileName}</span>}
-               {isLoading && <Loader2 className="h-5 w-5 animate-spin text-secondary-foreground" />}
-             </div>
-             <p className="text-xs text-muted-foreground">Placeholders should be in the format {'{placeholder_name}'}.</p>
-          </div>
+           {/* File Upload & Reset Section */}
+            <div className="space-y-2">
+              <Label htmlFor="template-upload" className="text-lg font-medium">
+                1. Upload Template (.docx)
+              </Label>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                 <Input
+                   ref={fileInputRef} // Assign ref
+                   id="template-upload"
+                   type="file"
+                   accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                   onChange={handleFileChange}
+                   className="hidden"
+                   disabled={isLoading || isProcessing}
+                 />
+                 <Button
+                    variant="outline"
+                    onClick={() => fileInputRef.current?.click()} // Use ref to trigger click
+                    disabled={isLoading || isProcessing}
+                    className="flex-shrink-0 w-full sm:w-auto"
+                 >
+                   <Upload className="mr-2 h-4 w-4" />
+                   {fileName ? 'Change File' : 'Choose File'}
+                 </Button>
+                 {fileName && (
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <span className="text-sm text-muted-foreground truncate" title={fileName}>{fileName}</span>
+                      {isLoading && <Loader2 className="h-5 w-5 animate-spin text-secondary-foreground" />}
+                    </div>
+                  )}
+                   {/* Reset Button */}
+                   {(templateFile || fileName || placeholders.length > 0 || error) && (
+                     <Button
+                         variant="ghost"
+                         size="icon"
+                         onClick={handleReset}
+                         disabled={isLoading || isProcessing}
+                         className="text-muted-foreground hover:text-destructive flex-shrink-0"
+                         aria-label="Reset form"
+                       >
+                         <RotateCcw className="h-5 w-5" />
+                       </Button>
+                   )}
+              </div>
+              <p className="text-xs text-muted-foreground">Placeholders should be in the format {'{placeholder_name}'}.</p>
+            </div>
 
           {/* Placeholder Input Section */}
           {placeholders.length > 0 && (
@@ -235,17 +375,15 @@ export default function Home() {
                 <div className="space-y-4">
                   {placeholders.map((placeholder) => (
                     <div key={placeholder} className="space-y-1">
-                      {/* Label displays the placeholder name without braces */}
                       <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
                         {placeholder}
                       </Label>
-                      {/* Input name uses the placeholder name without braces */}
                       <Input
                         id={placeholder}
                         name={placeholder}
                         value={formData[placeholder] || ''}
                         onChange={handleInputChange}
-                        placeholder={`Enter value for {${placeholder}}`} // Placeholder text shows braces for context
+                        placeholder={`Enter value for {${placeholder}}`}
                         className="bg-card"
                         disabled={isProcessing}
                       />
@@ -272,7 +410,7 @@ export default function Home() {
           )}
 
           {/* Download Section */}
-          {generatedBlob && (
+          {generatedBlob && !error && ( // Only show download if blob exists AND there's no current error
             <div className="space-y-2 pt-4 border-t">
                  <Label className="text-lg font-medium">3. Download Your Document</Label>
                  <p className="text-sm text-muted-foreground">Your document '{generatedFileName}' is ready.</p>
