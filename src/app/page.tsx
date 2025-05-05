@@ -30,15 +30,16 @@ interface InspectModuleType {
     };
     getTags(fileType: string): Record<string, unknown>;
     getAllTags(): Record<string, unknown>;
-    nullGetter(part: any, scope: any): undefined;
+    nullGetter(part: any, scope: any, context?: any): undefined; // Made context optional as per fix
     // Add other methods/properties if needed based on actual usage
 }
 
 // Custom module for inspecting tags reliably
-class InspectModule {
+class InspectModule implements InspectModuleType {
   public tags: Record<string, unknown> = {};
   public inspect: any = { tags: {} }; // Simplified for this use case
   public fullInspected: any = { tags: {} }; // Simplified
+  public name: string; // Add name property
 
   constructor() {
     this.tags = {};
@@ -58,18 +59,22 @@ class InspectModule {
 
   // Method called by docxtemplater during parsing/rendering
    parse(placeHolderContent: string) {
-       this.tags[placeHolderContent] = true; // Record the tag found
+       // Basic filter to avoid XML tags
+       if (placeHolderContent && !placeHolderContent.startsWith('<') && !placeHolderContent.endsWith('>')) {
+            this.tags[placeHolderContent] = true; // Record the tag found
+       }
        return {type: "placeholder", value: placeHolderContent};
    }
 
    // Required nullGetter for modules
-    nullGetter(part: any, scope: any, context: any) {
+    nullGetter(part: any, scope: any, context?: any): undefined { // Make context optional
         // This module doesn't change rendering, just inspects
          if (!context) {
              return undefined;
          }
          const resolved = context.scopePathItem;
-         if (context.scopePathLength >= resolved.length) {
+          // Fix: Check if resolved is defined before accessing length
+          if (!resolved || context.scopePathLength >= resolved.length) {
              return undefined;
          }
          const value = resolved[context.scopePathLength];
@@ -82,7 +87,18 @@ class InspectModule {
     // The inspection happens during render/resolve, so check the collected tags
     // The `inspect` object might hold more structured info after render,
     // but simply collecting during parse seems sufficient here.
-     return this.inspect.tags || this.tags; // Prefer inspect.tags if available after render
+     // Filter out any keys that look like XML/internal docx tags
+     const filteredTags: Record<string, unknown> = {};
+     const potentialTags = this.inspect.tags || this.tags;
+     for (const key in potentialTags) {
+         if (Object.prototype.hasOwnProperty.call(potentialTags, key)) {
+             // Simple filter: exclude if it contains '<', '/', or ':' which are common in XML artifacts
+              if (!key.includes('<') && !key.includes('/') && !key.includes(':')) {
+                 filteredTags[key] = potentialTags[key];
+             }
+         }
+     }
+     return filteredTags;
   }
 
    // Additional required methods/properties for a basic module
@@ -158,7 +174,7 @@ export default function Home() {
                 const doc = new Docxtemplater(zip, {
                      modules: [iModule],
                      // Use the custom nullGetter from the module to avoid errors on missing tags during inspection
-                     nullGetter: (part, scopeManager) => iModule.nullGetter(part, scopeManager, undefined),
+                     nullGetter: (part, scopeManager) => iModule.nullGetter(part, scopeManager), // Removed undefined context pass
                       // Important: Prevent errors if placeholders are not resolvable during inspection
                      parser: (tag) => {
                        return {
@@ -178,8 +194,26 @@ export default function Home() {
                 // Perform a dry-run render to trigger the inspection module
                 // We don't need actual data here, just need the parser to run.
                 // Providing an empty object ensures it doesn't crash on missing data.
-                doc.setData({});
-                doc.render(); // This triggers the module's parse/get methods
+                 try {
+                    doc.render({}); // This triggers the module's parse/get methods
+                 } catch (renderError: any) {
+                    // Errors during inspection render are usually template syntax issues
+                    console.warn("Inspection render caught an error (likely template syntax):", renderError);
+                     // Check for specific docxtemplater compilation errors
+                     if (renderError.properties && renderError.properties.id === 'compile_error') {
+                         setError(`Template Compilation Error: ${renderError.properties.explanation || renderError.message}. Please check the template syntax.`);
+                     } else if (renderError.properties && renderError.properties.id === 'template_error') {
+                          setError(`Template Syntax Error: ${renderError.message}. Check placeholder formatting.`);
+                     }
+                     else {
+                        // Don't throw a fatal error here, but maybe log it
+                        console.error('Unexpected error during template inspection:', renderError);
+                        // Optionally, set a less severe error or warning
+                        // setError("Could not fully inspect template placeholders due to an internal issue.");
+                     }
+                     // Allow continuing to show potentially extracted tags if any were found before error
+                 }
+
 
                 // Get the tags collected by the inspection module
                 const tags = iModule.getAllTags();
@@ -196,7 +230,7 @@ export default function Home() {
 
             } catch (err: any) {
               console.error('Error processing DOCX file:', err);
-               // Check for specific docxtemplater compilation errors
+               // Check for specific docxtemplater compilation errors that happen before render
                if (err.properties && err.properties.id === 'compile_error') {
                    setError(`Template Compilation Error: ${err.properties.explanation || err.message}. Please check the template syntax near '${err.properties.postparsed?.[err.properties.offset]?.value || 'unknown tag'}'.`);
                } else if (err.message && err.message.includes("Corrupted zip")) {
@@ -351,7 +385,7 @@ export default function Home() {
                     </div>
                   )}
                    {/* Reset Button */}
-                   {(templateFile || fileName || placeholders.length > 0 || error) && (
+                   {(templateFile || fileName || placeholders.length > 0 || Object.keys(formData).some(k => formData[k]) || error) && ( // Show reset if there's a file, name, placeholders, filled data, or an error
                      <Button
                          variant="ghost"
                          size="icon"
