@@ -6,6 +6,8 @@ export default {
     "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+    // Ensure safelist includes dynamic classes if necessary, or adjust content paths
+    // For this case, the class names are directly in the components/page, so they should be picked up.
   ],
   theme: {
   	extend: {
@@ -40,6 +42,20 @@ export default {
   				DEFAULT: 'hsl(var(--destructive))',
   				foreground: 'hsl(var(--destructive-foreground))'
   			},
+          // Add Teal color definition for direct use if needed outside btn-teal
+           teal: {
+               DEFAULT: '#008080',
+               '100': '#e0f2f1',
+               '200': '#b2dfdb',
+               '300': '#80cbc4',
+               '400': '#4db6ac',
+               '500': '#26a69a',
+               '600': '#009688',
+               '700': '#00897b',
+               '800': '#00796b',
+               '900': '#00695c',
+               '950': '#004d40' // Darker teal for hover/active states maybe
+           },
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
   			ring: 'hsl(var(--ring))',
