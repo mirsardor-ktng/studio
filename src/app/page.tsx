@@ -62,32 +62,46 @@ export default function Home() {
                 // Dynamically import pizzip on the client-side
                 const PizZip = (await import('pizzip')).default;
                 const zip = new PizZip(content);
-                const doc = zip.files['word/document.xml'];
+                // Look for the main document part
+                const doc = zip.files['word/document.xml'] ||
+                            zip.files['word/document2.xml'] || // Some tools might name it differently
+                            Object.keys(zip.files).find(name => name.startsWith('word/') && name.endsWith('.xml')); // More robust search
+
                 if (!doc) {
-                    throw new Error('Could not find word/document.xml in the DOCX file.');
+                    throw new Error('Could not find the main document XML part (e.g., word/document.xml) in the DOCX file.');
                 }
                 const xmlContent = doc.asText();
 
-                // Extract placeholders
+                // Extract placeholders - capture content inside {}
                 const foundPlaceholders = new Set<string>();
                 let match;
+                // Regex specifically targets content *inside* the curly braces
                 while ((match = PLACEHOLDER_REGEX.exec(xmlContent)) !== null) {
-                  foundPlaceholders.add(match[1]);
+                  // match[1] contains the captured group (content inside {})
+                  foundPlaceholders.add(match[1].trim()); // Trim whitespace
                 }
 
                 const uniquePlaceholders = Array.from(foundPlaceholders);
                 setPlaceholders(uniquePlaceholders);
 
-                // Initialize form data with empty strings for each placeholder
+                // Initialize form data with empty strings for each placeholder (using the name without braces)
                 const initialFormData: Record<string, string> = {};
                 uniquePlaceholders.forEach((ph) => {
                   initialFormData[ph] = '';
                 });
                 setFormData(initialFormData);
 
-            } catch (err) {
+            } catch (err: any) {
               console.error('Error processing DOCX file:', err);
-              setError('Failed to process the DOCX template. Please ensure it is a valid .docx file and contains placeholders like {placeholder_name}.');
+               let userMessage = 'Failed to process the DOCX template. ';
+               if (err.message && err.message.includes("Corrupted zip")) {
+                    userMessage += "The file might be corrupted or not a valid .docx file.";
+               } else if (err.message) {
+                   userMessage += err.message;
+               } else {
+                   userMessage += 'Please ensure it is a valid .docx file and check its structure.';
+               }
+               setError(userMessage);
               setTemplateFile(null);
               setPlaceholders([]);
               setFormData({});
@@ -129,6 +143,7 @@ export default function Home() {
 
     try {
       const fileBuffer = await templateFile.arrayBuffer();
+      // Pass formData where keys are placeholder names (without braces)
       const result = await generateDocument(fileBuffer, formData);
 
       if (result.success && result.blob) {
@@ -192,7 +207,7 @@ export default function Home() {
                <Input
                  id="template-upload"
                  type="file"
-                 accept=".docx"
+                 accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" // More specific MIME type
                  onChange={handleFileChange}
                  className="hidden"
                  disabled={isLoading || isProcessing}
@@ -220,15 +235,17 @@ export default function Home() {
                 <div className="space-y-4">
                   {placeholders.map((placeholder) => (
                     <div key={placeholder} className="space-y-1">
+                      {/* Label displays the placeholder name without braces */}
                       <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
                         {placeholder}
                       </Label>
+                      {/* Input name uses the placeholder name without braces */}
                       <Input
                         id={placeholder}
                         name={placeholder}
                         value={formData[placeholder] || ''}
                         onChange={handleInputChange}
-                        placeholder={`Enter value for {${placeholder}}`}
+                        placeholder={`Enter value for {${placeholder}}`} // Placeholder text shows braces for context
                         className="bg-card"
                         disabled={isProcessing}
                       />
