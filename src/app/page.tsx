@@ -82,6 +82,10 @@ class InspectModule implements InspectModuleType {
           if (!resolved || !Array.isArray(resolved) || context.scopePathLength >= resolved.length) {
              return undefined;
          }
+         // Ensure value exists at the specified scopePathLength
+         if (context.scopePathLength >= resolved.length) {
+            return undefined; // Avoid index out of bounds
+         }
          const value = resolved[context.scopePathLength];
          return value;
     }
@@ -131,6 +135,35 @@ class InspectModule implements InspectModuleType {
 
 
 }
+
+// Helper to format number as Uzbek Sum currency string
+const formatCurrencyUzbekSum = (value: string | number | undefined): string => {
+    if (value === undefined || value === null || value === '') return '';
+
+    const num = typeof value === 'string' ? parseFloat(value.replace(/[^0-9.]/g, '')) : value;
+
+    if (isNaN(num)) {
+        return ''; // Return empty if not a valid number after cleaning
+    }
+
+    // Format with spaces as thousands separators, specific to Uzbek locale preference if possible
+    // Using 'ru-RU' as a common locale that uses spaces. Adjust if a specific UZ locale is better.
+    const formattedNumber = num.toLocaleString('ru-RU', {
+        style: 'decimal', // Use 'decimal' to avoid automatic currency symbols
+        maximumFractionDigits: 2, // Allow decimals if needed, though example is integer
+        minimumFractionDigits: 0,
+    });
+
+    return `${formattedNumber} сум`;
+};
+
+// Helper to get raw numeric value from formatted string or number
+const getRawNumericValue = (value: string | number | undefined): number | null => {
+    if (value === undefined || value === null || value === '') return null;
+    const cleanedString = typeof value === 'string' ? value.replace(/[^0-9.]/g, '') : String(value);
+    const num = parseFloat(cleanedString);
+    return isNaN(num) ? null : num;
+};
 
 
 export default function Home() {
@@ -229,11 +262,13 @@ export default function Home() {
 
                 // Initialize form data
                 const initialFormData: Record<string, string> = {};
+                 const currentFormData = { ...formData }; // Capture current state for pre-filling
                 uniquePlaceholders.forEach((ph) => {
                   initialFormData[ph] = '';
-                  // Pre-fill contract_am_words if contract_am exists
-                   if (ph === 'contract_am_words' && formData['contract_am']) {
-                     initialFormData[ph] = numberToWords(parseFloat(formData['contract_am']) || 0);
+                  // Pre-fill contract_am_words if contract_am exists (using captured state)
+                   if (ph === 'contract_am_words' && currentFormData['contract_am']) {
+                      const rawAmount = getRawNumericValue(currentFormData['contract_am']);
+                      initialFormData[ph] = rawAmount !== null ? numberToWords(rawAmount) : '';
                    }
                 });
                 setFormData(initialFormData);
@@ -266,24 +301,33 @@ export default function Home() {
 
    const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
        const {name, value} = event.target;
-       setFormData((prevData) => {
-           const newData = {
-               ...prevData,
-               [name]: value,
-           };
+       const isAmountField = name.includes('am') && !name.includes('words');
 
-           // Automatically update contract_am_words when contract_am changes
-           if (name === 'contract_am' && newData.hasOwnProperty('contract_am_words')) {
-               const amount = parseFloat(value);
-               if (!isNaN(amount)) {
-                   newData['contract_am_words'] = numberToWords(amount);
-               } else {
-                   newData['contract_am_words'] = ''; // Clear if input is not a valid number
-               }
-           }
+        setFormData((prevData) => {
+            const newData = { ...prevData };
 
-           return newData;
-       });
+            if (isAmountField) {
+                 // Keep raw numeric value or cleaned string in state for processing
+                 const rawValue = value.replace(/[^0-9.]/g, ''); // Allow only numbers and dot
+                 newData[name] = rawValue; // Store the cleaned numeric string
+
+                 // Automatically update corresponding _words field
+                 const wordsFieldName = `${name}_words`;
+                 if (newData.hasOwnProperty(wordsFieldName)) {
+                     const amount = parseFloat(rawValue);
+                     if (!isNaN(amount)) {
+                         newData[wordsFieldName] = numberToWords(amount);
+                     } else {
+                         newData[wordsFieldName] = ''; // Clear if input is not a valid number
+                     }
+                 }
+            } else {
+                 newData[name] = value; // Store other fields as is
+            }
+
+
+            return newData;
+        });
    };
 
   // Internal reset logic without resetting file input
@@ -321,19 +365,32 @@ export default function Home() {
     setGeneratedBlob(null); // Clear previous blob
 
     try {
-      const fileBuffer = await templateFile.arrayBuffer();
-      const result = await generateDocument(fileBuffer, formData);
+        const fileBuffer = await templateFile.arrayBuffer();
 
-      if (result.success && result.blob) {
-        setGeneratedBlob(result.blob);
-         if (templateFile) {
-             setGeneratedFileName(`generated_${templateFile.name}`);
-         }
+        // Prepare data for docxtemplater, formatting amount fields
+        const processedData: Record<string, string> = {};
+        for (const key in formData) {
+             if (key.includes('am') && !key.includes('words')) {
+                 // Format amount fields for the document
+                 processedData[key] = formatCurrencyUzbekSum(formData[key]);
+             } else {
+                 // Use other fields directly (including _words fields)
+                 processedData[key] = formData[key];
+             }
+        }
 
-      } else {
-        setError(result.error || 'Failed to generate the document.');
-        setGeneratedBlob(null); // Ensure blob is null on error
-      }
+
+        const result = await generateDocument(fileBuffer, processedData);
+
+        if (result.success && result.blob) {
+            setGeneratedBlob(result.blob);
+            if (templateFile) {
+                 setGeneratedFileName(`generated_${templateFile.name}`);
+            }
+        } else {
+            setError(result.error || 'Failed to generate the document.');
+            setGeneratedBlob(null); // Ensure blob is null on error
+        }
     } catch (err) {
       console.error('Error generating document:', err);
       setError('An unexpected error occurred during document generation.');
@@ -430,28 +487,38 @@ export default function Home() {
               <Label className="text-lg font-medium">2. Fill Placeholder Values</Label>
               <ScrollArea className="h-64 w-full rounded-md border p-4 bg-secondary/30">
                 <div className="space-y-4">
-                  {placeholders.map((placeholder) => (
-                    <div key={placeholder} className="space-y-1">
-                      <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
-                        {placeholder} {placeholder === 'contract_am_words' ? '(Auto-generated)' : ''}
-                      </Label>
-                      <Input
-                        id={placeholder}
-                        name={placeholder}
-                        value={formData[placeholder] || ''}
-                        onChange={handleInputChange}
-                        placeholder={`Enter value for {${placeholder}}`}
-                        className={cn(
-                          "bg-card",
-                          placeholder === 'contract_am_words' && 'text-muted-foreground italic' // Style the auto-generated field
-                        )}
-                        disabled={isProcessing || placeholder === 'contract_am_words'} // Disable contract_am_words input
-                        readOnly={placeholder === 'contract_am_words'} // Make it read-only
-                        type={placeholder === 'contract_am' ? 'number' : 'text'} // Use number type for contract_am
-                        step={placeholder === 'contract_am' ? '0.01' : undefined} // Allow decimals for amount
-                      />
-                    </div>
-                  ))}
+                  {placeholders.map((placeholder) => {
+                     const isAmountField = placeholder.includes('am') && !placeholder.includes('words');
+                     // Determine the value to display in the input field
+                     const displayValue = isAmountField
+                         ? formatCurrencyUzbekSum(formData[placeholder]) // Display formatted currency for amount fields
+                         : formData[placeholder] || ''; // Display raw value for others
+
+                     return (
+                         <div key={placeholder} className="space-y-1">
+                           <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
+                             {placeholder} {placeholder.endsWith('_words') ? '(Auto-generated)' : ''}
+                           </Label>
+                           <Input
+                             id={placeholder}
+                             name={placeholder}
+                             value={displayValue} // Use displayValue here
+                             onChange={handleInputChange}
+                             placeholder={`Enter value for {${placeholder}}`}
+                             className={cn(
+                               "bg-card",
+                               placeholder.endsWith('_words') && 'text-muted-foreground italic' // Style the auto-generated field
+                             )}
+                             disabled={isProcessing || placeholder.endsWith('_words')} // Disable _words input
+                             readOnly={placeholder.endsWith('_words')} // Make it read-only
+                             type={'text'} // Use text type for all inputs now due to formatting
+                             // Removed step={...} as type is text
+                             // Add inputMode="numeric" for amount fields for better mobile UX
+                             inputMode={isAmountField ? "decimal" : "text"}
+                           />
+                         </div>
+                     );
+                  })}
                 </div>
               </ScrollArea>
 
