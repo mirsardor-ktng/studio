@@ -102,7 +102,22 @@ class InspectModule implements InspectModuleType {
              // Filter out keys that are likely XML/internal tags or contain complex structures
              // Ensure it's a simple word possibly with underscores/numbers
               if (/^[a-zA-Z0-9_]+$/.test(key)) {
-                 filteredTags[key] = potentialTags[key];
+                 // Exclude auto-generated fields if they appear raw in template (shouldn't normally)
+                 if (key !== 'director_name_genitive' && !key.endsWith('_words')) {
+                     filteredTags[key] = potentialTags[key];
+                 } else if (key.endsWith('_words')) {
+                    // Check if corresponding _am field exists
+                    const baseAmField = key.replace('_words', '_am');
+                    if (potentialTags.hasOwnProperty(baseAmField)) {
+                       // Only include the _words field if the base _am field is also present
+                        filteredTags[key] = potentialTags[key];
+                    }
+                 } else if (key === 'director_name_genitive') {
+                     // Only include genitive if base director_name exists
+                     if (potentialTags.hasOwnProperty('director_name')) {
+                        filteredTags[key] = potentialTags[key];
+                     }
+                 }
              }
          }
      }
@@ -111,7 +126,19 @@ class InspectModule implements InspectModuleType {
           for (const key in this.inspect.tags) {
                if (Object.prototype.hasOwnProperty.call(this.inspect.tags, key)) {
                    if (/^[a-zA-Z0-9_]+$/.test(key)) {
-                        filteredTags[key] = this.inspect.tags[key];
+                       // Exclude auto-generated fields here too
+                        if (key !== 'director_name_genitive' && !key.endsWith('_words')) {
+                            filteredTags[key] = this.inspect.tags[key];
+                        } else if (key.endsWith('_words')) {
+                            const baseAmField = key.replace('_words', '_am');
+                            if (this.inspect.tags.hasOwnProperty(baseAmField)) {
+                                filteredTags[key] = this.inspect.tags[key];
+                            }
+                        } else if (key === 'director_name_genitive') {
+                            if (this.inspect.tags.hasOwnProperty('director_name')) {
+                                filteredTags[key] = this.inspect.tags[key];
+                            }
+                        }
                    }
                }
            }
@@ -183,26 +210,29 @@ function getGenitiveCase(name: string | undefined): string {
 
     // Rules priority: Specific endings first, then more general ones.
 
-    // Feminine endings -а/-я -> -ой/-ей (Common rule, applies to many cases like -ова, -ева, -ина, -ая)
-    if (lastName.endsWith('ова') || lastName.endsWith('ева') || lastName.endsWith('ина') || lastName.endsWith('ая')) {
-        lastName = lastName.substring(0, lastName.length - 1) + 'ой';
-    }
-    // More general feminine -а -> -ой (e.g., Петрова -> Петровой)
-    else if (lastName.endsWith('а') && !lastName.endsWith('ска') && !lastName.endsWith('цка')) { // Avoid changing masculine -ска/-цка
+    // Feminine endings -ова/-ева/-ина/-ая -> -овой/-евой/-иной/-ой
+     if (lastName.endsWith('ова') || lastName.endsWith('ева') || lastName.endsWith('ина')) {
+         lastName = lastName.substring(0, lastName.length - 1) + 'ой';
+     } else if (lastName.endsWith('ая')) {
+         lastName = lastName.substring(0, lastName.length - 2) + 'ой';
+     }
+    // More general feminine -а -> -ой (e.g., Петрова -> Петровой, Байматова -> Байматовой)
+    // Ensure not changing masculine -ска/-цка
+    else if (lastName.endsWith('а') && !lastName.endsWith('ска') && !lastName.endsWith('цка')) {
         lastName = lastName.substring(0, lastName.length - 1) + 'ой';
     }
     // Feminine ending -я -> -и (e.g., Синяя -> Синей - already covered by -ая? No, consider Берия -> Берии)
-    // This also applies to masculine sometimes. Rule: ending in -я -> -и
-    else if (lastName.endsWith('я')) {
+    // Also applies to nouns like Мария -> Марии, but surnames are less common. Let's try -и.
+    else if (lastName.endsWith('я') && !lastName.endsWith('ая') /* avoid double rule */) {
         lastName = lastName.substring(0, lastName.length - 1) + 'и';
     }
-    // Masculine endings -ов/-ев/-ин -> -ова/-ева/-ина
+    // Masculine endings -ов/-ев/-ин -> -ова/-ева/-ина (e.g. Иванов -> Иванова)
     else if (lastName.endsWith('ов') || lastName.endsWith('ев')) {
         lastName += 'а';
     } else if (lastName.endsWith('ин') && !lastName.endsWith('шин') && !lastName.endsWith('чин')) { // Avoid -шин/-чин common in masculine
         lastName += 'а';
     }
-    // Masculine endings -ский/-цкий -> -ского/-цкого
+    // Masculine endings -ский/-цкий -> -ского/-цкого (e.g. Невский -> Невского)
     else if (lastName.endsWith('ский') || lastName.endsWith('цкий')) {
       lastName = lastName.substring(0, lastName.length - 2) + 'ого';
     }
@@ -329,31 +359,64 @@ export default function Home() {
 
 
                 // Get the tags collected by the inspection module
-                const tags = iModule.getAllTags();
-                let uniquePlaceholders = Object.keys(tags);
+                const tagsObject = iModule.getAllTags();
+                 // Filter out the auto-generated fields from the initial list shown to the user
+                let userVisiblePlaceholders = Object.keys(tagsObject)
+                    .filter(ph => ph !== 'director_name_genitive' && !ph.endsWith('_words'));
 
-                 // Add the special genitive case placeholder if 'director_name' exists
-                 if (uniquePlaceholders.includes('director_name')) {
-                   // Ensure director_name_genitive is added and positioned correctly (e.g., after director_name)
-                    const directorIndex = uniquePlaceholders.indexOf('director_name');
-                    if (!uniquePlaceholders.includes('director_name_genitive')) {
-                         uniquePlaceholders.splice(directorIndex + 1, 0, 'director_name_genitive');
+
+                 // Check if 'director_name' exists to decide if 'director_name_genitive' should be added
+                 const hasDirectorName = userVisiblePlaceholders.includes('director_name');
+                 const allDetectedPlaceholders = Object.keys(tagsObject); // All tags found by module
+
+
+                // Create the final list of placeholders including auto-generated ones in correct order
+                let finalPlaceholders: string[] = [];
+                userVisiblePlaceholders.forEach(ph => {
+                    finalPlaceholders.push(ph);
+                    // If this is director_name and the genitive version was detected, add it next
+                    if (ph === 'director_name' && allDetectedPlaceholders.includes('director_name_genitive')) {
+                        finalPlaceholders.push('director_name_genitive');
                     }
-                 }
+                    // If this is an _am field and the _words version was detected, add it next
+                    const wordsField = ph.replace('_am', '_words');
+                     if (ph.endsWith('_am') && allDetectedPlaceholders.includes(wordsField)) {
+                        finalPlaceholders.push(wordsField);
+                    }
+                });
+
+                // Handle cases where _words or _genitive might exist without the base (less likely now)
+                // Or if the order was different in the original list. This ensures they are included if detected.
+                allDetectedPlaceholders.forEach(ph => {
+                   if ((ph.endsWith('_words') || ph === 'director_name_genitive') && !finalPlaceholders.includes(ph)) {
+                      // Try to insert after the base field if possible, otherwise add at the end
+                       const baseField = ph === 'director_name_genitive' ? 'director_name' : ph.replace('_words', '_am');
+                       const baseIndex = finalPlaceholders.indexOf(baseField);
+                       if (baseIndex !== -1) {
+                           finalPlaceholders.splice(baseIndex + 1, 0, ph);
+                       } else {
+                            // If base wasn't found (unlikely) or already processed, just add it
+                            if (!finalPlaceholders.includes(ph)) {
+                                finalPlaceholders.push(ph);
+                            }
+                       }
+                   }
+                });
 
 
-                 // If no tags found and there wasn't a serious error already, report template issue
-                if (uniquePlaceholders.filter(p => p !== 'director_name_genitive').length === 0 && !error) { // Exclude generated tag from check
-                    setError("No placeholders like {placeholder_name} found, or the template might have syntax errors preventing parsing.");
+
+                 // If no user-visible tags found and there wasn't a serious error already, report template issue
+                if (userVisiblePlaceholders.length === 0 && !error) {
+                    setError("No user-editable placeholders like {placeholder_name} found, or the template might have syntax errors preventing parsing.");
                 }
 
 
-                setPlaceholders(uniquePlaceholders);
+                setPlaceholders(finalPlaceholders); // Use the final ordered list
 
                 // Initialize form data
                 const initialFormData: Record<string, string> = {};
                  const currentFormData = { ...formData }; // Capture current state for pre-filling
-                uniquePlaceholders.forEach((ph) => {
+                finalPlaceholders.forEach((ph) => {
                   // Pre-fill director_name_genitive based on director_name
                   if (ph === 'director_name_genitive') {
                     initialFormData[ph] = getGenitiveCase(currentFormData['director_name'] || '');
@@ -660,7 +723,7 @@ export default function Home() {
                {/* Generate Button */}
                 <Button
                     type="submit"
-                    disabled={isProcessing || isLoading || !templateFile || placeholders.filter(p => p !== 'director_name_genitive').length === 0} // Also check placeholders excluding generated one
+                    disabled={isProcessing || isLoading || !templateFile || placeholders.filter(p => p !== 'director_name_genitive' && !p.endsWith('_words')).length === 0} // Disable if no user-editable placeholders
                     className="w-full btn-teal"
                   >
                     {isProcessing ? (
