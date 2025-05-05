@@ -88,7 +88,19 @@ class InspectModule implements InspectModuleType {
              return undefined;
          }
          const value = resolved[context.scopePathLength];
-         return value; // Return the value found in scope path
+         // Ensure the value is not undefined before attempting to access properties on it
+         // This check helps prevent the 'toString' error if the scope lookup resolves to undefined.
+         if (value === undefined || value === null) {
+             return undefined;
+         }
+         // If we expect 'value' to sometimes be an object/array, add specific checks here if needed.
+         // For simple inspection, returning undefined when the path resolves is usually fine.
+         // If the template strictly expects a string, and gets undefined, render({}) might fail.
+         // For inspection, we primarily care about collecting tag *names*.
+
+         // Return undefined, allowing the module to collect the tag name via `parse`.
+         // The actual rendering happens later in handleSubmit with real data.
+         return undefined;
     }
 
 
@@ -217,14 +229,21 @@ function getGenitiveCase(name: string | undefined): string {
          lastName = lastName.substring(0, lastName.length - 2) + 'ой';
      }
     // More general feminine -а -> -ой (e.g., Петрова -> Петровой, Байматова -> Байматовой)
-    // Ensure not changing masculine -ска/-цка
-    else if (lastName.endsWith('а') && !lastName.endsWith('ска') && !lastName.endsWith('цка')) {
+    // Ensure not changing masculine -ска/-цка or specific names like 'Гурцкая'
+    else if (lastName.endsWith('а') && !lastName.endsWith('ска') && !lastName.endsWith('цка') && lastName !== 'Гурцкая' && !lastName.endsWith('ока')) { // Added exceptions
         lastName = lastName.substring(0, lastName.length - 1) + 'ой';
     }
     // Feminine ending -я -> -и (e.g., Синяя -> Синей - already covered by -ая? No, consider Берия -> Берии)
     // Also applies to nouns like Мария -> Марии, but surnames are less common. Let's try -и.
-    else if (lastName.endsWith('я') && !lastName.endsWith('ая') /* avoid double rule */) {
-        lastName = lastName.substring(0, lastName.length - 1) + 'и';
+    // Add exception for 'я' ending like 'Галустян' (masculine) - check consonant before 'я'? Tricky.
+    // Let's refine: if ends in 'я' and previous is vowel (mostly feminine like 'Дарья'), change to 'и'.
+    else if (lastName.endsWith('я')) {
+        if (/[аеиоуыэюя]я$/i.test(lastName)) { // Vowel before 'я' -> feminine ending '-и'
+             lastName = lastName.substring(0, lastName.length - 1) + 'и';
+        } else if (/[бвгджзклмнпрстфхцчшщ]я$/i.test(lastName)) { // Consonant before 'я' -> masculine ending '-и' (e.g. Илья -> Ильи) ? Often '-я' -> '-и' for masculine too
+             lastName = lastName.substring(0, lastName.length - 1) + 'и'; // Tentatively use '-и' for consonant + 'я' too
+        }
+        // If just 'я' like 'Я', no change? Or handle common names. Keep simple for now.
     }
     // Masculine endings -ов/-ев/-ин -> -ова/-ева/-ина (e.g. Иванов -> Иванова)
     else if (lastName.endsWith('ов') || lastName.endsWith('ев')) {
@@ -250,7 +269,10 @@ function getGenitiveCase(name: string | undefined): string {
     }
     // Masculine ending in consonant -> add 'а' (e.g. Мельник -> Мельника)
     // Exclude 'й' which is handled by -ый/-ий or -ой
+    // Add exceptions for some consonant endings that don't change or change differently (e.g., foreign names) - complex!
     else if (/[бвгджзклмнпрстфхцчшщ]$/i.test(lastName)) {
+         // Check for common non-inflecting consonant endings if needed (e.g., 'Кох')
+         // For simplicity, assume most standard Russian consonant endings take 'а'
          lastName += 'а';
     }
 
@@ -272,14 +294,10 @@ export default function Home() {
 
   const fileInputRef = useRef<HTMLInputElement>(null); // Ref for file input
 
-  // Avoid hydration mismatch for generated file name
+  // Avoid hydration mismatch for generated file name (initial state)
   useEffect(() => {
-      if (templateFile) {
-          setGeneratedFileName(`generated_${templateFile.name}`);
-      } else {
-          setGeneratedFileName('generated_document.docx');
-      }
-  }, [templateFile]);
+      setGeneratedFileName('generated_document.docx');
+  }, []);
 
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -340,11 +358,13 @@ export default function Home() {
                 // Render with empty data just to ensure all parts are processed for tag collection
                 // This might still fail on complex templates, but tags might be collected already.
                  try {
-                    doc.render({}); // This triggers the module's get methods if not already done by compile
+                     // The nullGetter in the InspectModule now returns undefined for unresolved tags
+                     // during this inspection render, preventing the 'toString' error.
+                    doc.render({});
                  } catch (renderError: any) {
                     // Log benignly as render might fail without data, but compile() likely got the tags
-                     // Avoid logging "Cannot read property 'toString' of undefined" which is expected here
-                    if (!renderError.message || !renderError.message.includes('toString')) {
+                     // Avoid logging "Cannot read property 'toString' of undefined" which is now handled by nullGetter
+                    if (!renderError.message || (!renderError.message.includes('toString') && !renderError.message.includes('undefined'))) {
                          console.warn("Inspection render encountered an error (might be ignorable if tags were found):", renderError.message);
                     }
                      // Check if it's a 'missing data' type error, which we expect here.
@@ -507,7 +527,7 @@ export default function Home() {
       setError(null);
       setFileName('');
       setGeneratedBlob(null);
-      setGeneratedFileName('generated_document.docx');
+      setGeneratedFileName('generated_document.docx'); // Reset to default
       setIsLoading(false);
       setIsProcessing(false);
   }
@@ -563,17 +583,24 @@ export default function Home() {
 
         if (result.success && result.blob) {
             setGeneratedBlob(result.blob);
-            if (templateFile) {
-                 setGeneratedFileName(`generated_${templateFile.name}`);
-            }
+            // Generate filename based on form data
+            const contractNum = formData['contract_num'] || 'unknown_contract';
+            const companyName = formData['company_name'] || 'unknown_company';
+            // Sanitize filename parts (basic example)
+            const safeContractNum = contractNum.replace(/[^a-z0-9_\-\s]/gi, '_');
+            const safeCompanyName = companyName.replace(/[^a-z0-9_\-\s]/gi, '_');
+            setGeneratedFileName(`${safeContractNum} ${safeCompanyName}.docx`);
+
         } else {
             setError(result.error || 'Failed to generate the document.');
             setGeneratedBlob(null); // Ensure blob is null on error
+            setGeneratedFileName('generated_document.docx'); // Reset filename on error
         }
     } catch (err) {
       console.error('Error generating document:', err);
       setError('An unexpected error occurred during document generation.');
       setGeneratedBlob(null); // Ensure blob is null on error
+       setGeneratedFileName('generated_document.docx'); // Reset filename on error
     } finally {
       setIsProcessing(false);
     }
@@ -599,7 +626,6 @@ export default function Home() {
         <CardHeader>
           <CardTitle className="text-3xl font-bold text-center text-primary flex items-center justify-center gap-2">
             <FileText className="w-8 h-8 text-accent-foreground" /> DocuMint
-                <span className="text-base text-muted-foreground">Umida edition</span>
           </CardTitle>
           <CardDescription className="text-center text-muted-foreground pt-2">
             Upload your .docx template, fill in the placeholder values, and generate your document.
@@ -742,7 +768,7 @@ export default function Home() {
           {generatedBlob && !error && ( // Only show download if blob exists AND there's no current error
             <div className="space-y-2 pt-4 border-t">
                  <Label className="text-lg font-medium">3. Download Your Document</Label>
-                 <p className="text-sm text-muted-foreground">Your document '{generatedFileName}' is ready.</p>
+                 <p className="text-sm text-muted-foreground">Your document <span className="font-medium">'{generatedFileName}'</span> is ready.</p> {/* Show generated filename */}
                  <Button onClick={handleDownload} className="w-full btn-teal-outline">
                    <Download className="mr-2 h-4 w-4" />
                    Download Document
