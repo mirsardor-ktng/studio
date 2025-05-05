@@ -1,3 +1,4 @@
+
 'use client';
 
 import type {ChangeEvent, FormEvent} from 'react';
@@ -72,22 +73,9 @@ class InspectModule implements InspectModuleType {
    }
 
    // Required nullGetter for modules
-    nullGetter(part: any, scope: any, context?: any): undefined { // Make context optional
-        // This module doesn't change rendering, just inspects
-         if (!context) {
-             return undefined;
-         }
-         const resolved = context.scopePathItem;
-          // Fix: Check if resolved is defined before accessing length
-          if (!resolved || !Array.isArray(resolved) || context.scopePathLength >= resolved.length) {
-             return undefined;
-         }
-         // Ensure value exists at the specified scopePathLength
-         if (context.scopePathLength >= resolved.length) {
-            return undefined; // Avoid index out of bounds
-         }
-         const value = resolved[context.scopePathLength];
-         return value;
+    nullGetter(part: any, scope?: any, context?: any): undefined { // Make scope and context optional
+        // This module doesn't change rendering, just inspects. Always return undefined during inspection.
+        return undefined;
     }
 
 
@@ -216,47 +204,50 @@ export default function Home() {
                 const zip = new PizZip(content);
                 const iModule = new InspectModule();
 
-                 // Initialize Docxtemplater with the inspection module
+                 // Initialize Docxtemplater ONLY with the module for inspection
                 const doc = new Docxtemplater(zip, {
-                     modules: [iModule],
-                     // Use the custom nullGetter from the module to avoid errors on missing tags during inspection
-                     nullGetter: (part, scopeManager, context) => iModule.nullGetter(part, scopeManager, context), // Pass context
-                      // Important: Prevent errors if placeholders are not resolvable during inspection
-                     parser: (tag) => {
-                       return {
-                         get(scope: any, context: any) {
-                             // Log the tag being parsed by the module
-                             iModule.parse(tag);
-                             // Return undefined for inspection phase to avoid "property not found" errors
-                             return undefined;
-                         },
-                       };
-                     },
+                     modules: [iModule], // Use the module
                      paragraphLoop: true,
                      linebreaks: true,
+                     // REMOVE custom parser and nullGetter here, let the module handle it
                 });
 
 
-                // Perform a dry-run render to trigger the inspection module
-                // We don't need actual data here, just need the parser to run.
+                // Try compiling first to catch syntax errors
+                // This internally calls the module's parse method
+                doc.compile();
+
+                // Render with empty data just to ensure all parts are processed for tag collection
+                // This might still fail on complex templates, but tags might be collected already.
                  try {
-                    doc.render({}); // This triggers the module's parse/get methods
+                    doc.render({}); // This triggers the module's get methods if not already done by compile
                  } catch (renderError: any) {
-                    console.warn("Inspection render caught an error (likely template syntax):", renderError);
-                     if (renderError.properties && renderError.properties.id === 'compile_error') {
-                         setError(`Template Compilation Error: ${renderError.properties.explanation || renderError.message}. Please check the template syntax.`);
-                     } else if (renderError.properties && renderError.properties.id === 'template_error') {
-                          setError(`Template Syntax Error: ${renderError.message}. Check placeholder formatting.`);
+                     // Log benignly as render might fail without data, but compile() likely got the tags
+                     console.warn("Inspection render encountered an error (might be ignorable if tags were found):", renderError.message);
+                     // Check if it's a 'missing data' type error, which we expect here.
+                     if (renderError.properties?.id !== 'render_error' && renderError.properties?.id !== 'scope_error') {
+                        // If it's not a simple render/scope error, maybe re-throw or log more severely
+                        console.error('Potentially problematic error during inspection render:', renderError);
                      }
-                     else {
-                        console.error('Unexpected error during template inspection:', renderError);
-                     }
+                     // Continue anyway, hoping tags were collected during compile/parse phase
                  }
 
 
                 // Get the tags collected by the inspection module
                 const tags = iModule.getAllTags();
                 const uniquePlaceholders = Object.keys(tags);
+
+                // If no tags found and there was a render error, report template issue
+                 if (uniquePlaceholders.length === 0 && error === null) { // Check if an error wasn't already set
+                      // Check if a render error occurred previously
+                      const renderErrorExists = typeof window !== 'undefined' && (window as any).__INSPECTION_RENDER_ERROR__; // Simple flag, adjust if needed
+                       if (renderErrorExists) {
+                          setError("Failed to parse template placeholders. Check template syntax or complexity.");
+                          delete (window as any).__INSPECTION_RENDER_ERROR__; // Clean up flag
+                       } else if (uniquePlaceholders.length === 0) {
+                          setError("No placeholders found in the template. Ensure they are correctly formatted like {placeholder_name}.");
+                       }
+                 }
 
                 setPlaceholders(uniquePlaceholders);
 
@@ -266,9 +257,12 @@ export default function Home() {
                 uniquePlaceholders.forEach((ph) => {
                   initialFormData[ph] = '';
                   // Pre-fill contract_am_words if contract_am exists (using captured state)
-                   if (ph === 'contract_am_words' && currentFormData['contract_am']) {
-                      const rawAmount = getRawNumericValue(currentFormData['contract_am']);
-                      initialFormData[ph] = rawAmount !== null ? numberToWords(rawAmount) : '';
+                   if (ph.endsWith('_words') && !ph.startsWith('contract_am')) { // Generalize for any amount field
+                       const baseName = ph.replace('_words', '');
+                       if (currentFormData[baseName]) {
+                            const rawAmount = getRawNumericValue(currentFormData[baseName]);
+                            initialFormData[ph] = rawAmount !== null ? numberToWords(rawAmount) : '';
+                       }
                    }
                 });
                 setFormData(initialFormData);
@@ -489,6 +483,7 @@ export default function Home() {
                 <div className="space-y-4">
                   {placeholders.map((placeholder) => {
                      const isAmountField = placeholder.includes('am') && !placeholder.includes('words');
+                     const isWordsField = placeholder.endsWith('_words');
                      // Determine the value to display in the input field
                      const displayValue = isAmountField
                          ? formatCurrencyUzbekSum(formData[placeholder]) // Display formatted currency for amount fields
@@ -497,7 +492,7 @@ export default function Home() {
                      return (
                          <div key={placeholder} className="space-y-1">
                            <Label htmlFor={placeholder} className="text-sm font-medium text-foreground">
-                             {placeholder} {placeholder.endsWith('_words') ? '(Auto-generated)' : ''}
+                             {placeholder} {isWordsField ? '(Auto-generated)' : ''}
                            </Label>
                            <Input
                              id={placeholder}
@@ -507,10 +502,10 @@ export default function Home() {
                              placeholder={`Enter value for {${placeholder}}`}
                              className={cn(
                                "bg-card",
-                               placeholder.endsWith('_words') && 'text-muted-foreground italic' // Style the auto-generated field
+                               isWordsField && 'text-muted-foreground italic' // Style the auto-generated field
                              )}
-                             disabled={isProcessing || placeholder.endsWith('_words')} // Disable _words input
-                             readOnly={placeholder.endsWith('_words')} // Make it read-only
+                             disabled={isProcessing || isWordsField} // Disable _words input
+                             readOnly={isWordsField} // Make it read-only
                              type={'text'} // Use text type for all inputs now due to formatting
                              // Removed step={...} as type is text
                              // Add inputMode="numeric" for amount fields for better mobile UX
@@ -559,3 +554,4 @@ export default function Home() {
     </div>
   );
 }
+
