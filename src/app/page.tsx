@@ -586,10 +586,19 @@ export default function Home() {
             // Generate filename based on form data
             const contractNum = formData['contract_num'] || 'unknown_contract';
             const companyName = formData['company_name'] || 'unknown_company';
-            // Sanitize filename parts (basic example)
-            const safeContractNum = contractNum.replace(/[^a-z0-9_\-\s]/gi, '_');
-            const safeCompanyName = companyName.replace(/[^a-z0-9_\-\s]/gi, '_');
-            setGeneratedFileName(`${safeContractNum} ${safeCompanyName}.docx`);
+
+            // Sanitize filename parts: replace invalid characters with underscores
+            const sanitizeFilename = (name: string) => name.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim();
+
+            const safeContractNum = sanitizeFilename(contractNum);
+            const safeCompanyName = sanitizeFilename(companyName);
+
+             // Ensure filename isn't empty after sanitization
+            const finalContractNum = safeContractNum || 'contract';
+            const finalCompanyName = safeCompanyName || 'company';
+
+
+            setGeneratedFileName(`${finalContractNum} ${finalCompanyName}.docx`);
 
         } else {
             setError(result.error || 'Failed to generate the document.');
@@ -626,6 +635,7 @@ export default function Home() {
         <CardHeader>
           <CardTitle className="text-3xl font-bold text-center text-primary flex items-center justify-center gap-2">
             <FileText className="w-8 h-8 text-accent-foreground" /> DocuMint
+                 <span className="text-base text-muted-foreground">Umida edition</span>
           </CardTitle>
           <CardDescription className="text-center text-muted-foreground pt-2">
             Upload your .docx template, fill in the placeholder values, and generate your document.
